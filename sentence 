@@ -1,0 +1,132 @@
+If the two scripts are separate processes, they can’t share the in-memory model — but they can share the same on-disk cache. So you do:
+
+1. Download once (online) into a known cache folder
+
+
+2. In each script: force offline + load from the cached snapshot path
+
+
+
+Here’s the most reliable pattern.
+
+0) One-time download script (run once with internet)
+
+# download_model_once.py
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+CACHE = "/opt/hf_cache"   # choose ONE folder both scripts can read
+
+Path(CACHE).mkdir(parents=True, exist_ok=True)
+
+snapshot_download(
+    repo_id=MODEL,
+    cache_dir=CACHE,
+)
+print("Downloaded into cache:", CACHE)
+
+Run it once, then shut down internet.
+
+
+---
+
+1) Create a shared loader module both scripts import
+
+st_offline_loader.py
+
+import os
+from pathlib import Path
+from huggingface_hub import snapshot_download
+from sentence_transformers import SentenceTransformer
+
+def load_st_offline(model_name: str, cache_folder: str) -> SentenceTransformer:
+    # Must be set before any hub/transformers access in THIS process
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+    Path(cache_folder).mkdir(parents=True, exist_ok=True)
+
+    # Only use local cache; never download or check network
+    local_model_dir = snapshot_download(
+        repo_id=model_name,
+        cache_dir=cache_folder,
+        local_files_only=True,
+    )
+
+    # Load from local path (prevents “resolve” calls)
+    return SentenceTransformer(local_model_dir)
+
+Put this file somewhere both scripts can import (same folder, or a package).
+
+
+---
+
+2) Script A (offline)
+
+from st_offline_loader import load_st_offline
+
+MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+CACHE = "/opt/hf_cache"
+
+model = load_st_offline(MODEL, CACHE)
+print(model.encode(["script A works offline"]).shape)
+
+3) Script B (offline)
+
+from st_offline_loader import load_st_offline
+
+MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+CACHE = "/opt/hf_cache"
+
+model = load_st_offline(MODEL, CACHE)
+print(model.encode(["script B works offline"]).shape)
+
+
+---
+
+Extra hardening (recommended)
+
+Ensure both scripts use the same cache even if config differs
+
+You can also set:
+
+export HF_HOME=/opt/hf_cache
+export HF_HUB_CACHE=/opt/hf_cache/hub
+
+(Then still keep HF_HUB_OFFLINE=1 etc.)
+
+If you still see network attempts
+
+It usually means one of these:
+
+One script imports something that touches HF before you set env vars
+✅ Fix: set env vars at the top of the script, before any other imports:
+
+
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+from st_offline_loader import load_st_offline
+...
+
+Cache folder is different between scripts/users/containers
+✅ Fix: same cache_folder path, readable by both processes.
+
+
+
+---
+
+If you paste:
+
+your model_name
+
+your cache_folder
+
+and how you launch both scripts (same user? docker? systemd?)
+
+
+…I can tell you the exact best place to set env vars and the right cache path so it never tries the internet.

@@ -1,48 +1,56 @@
-def _post_chat(
-    api_url: str,
+def ollama_generate(
     model: str,
-    user_content: str,
+    prompt: str,
     temperature: float = 0.2,
     max_tokens: int = 400,
-    time_out: int = 90,
-) -> str:
-
-    headers = {
-        "Content-Type": "application/json",
-    }
+    context: list[int] | None = None,
+    timeout: int = 90,
+):
+    url = "http://localhost:11434/api/generate"
+    headers = {"Content-Type": "application/json"}
 
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content.strip()},
-        ],
-        "stream": False,
+        "prompt": prompt.strip(),
+        "system": SYSTEM_PROMPT,
+        "stream": True,
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
         },
     }
 
-    try:
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=time_out)
+    if context is not None:
+        payload["context"] = context
 
-        if resp.status_code != 200:
-            raise RuntimeError(f"[OLLAMA ERROR] {resp.status_code}: {resp.text[:200]}")
+    resp = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        stream=True,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
 
-        data = resp.json()
-        content = data.get("message", {}).get("content", "").strip()
+    parts = []
+    next_context = None
 
-        if not content:
-            raise RuntimeError("[LLM ERROR] Leere Antwort vom Ollama-Modell.")
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line:
+            continue
 
-        return content
+        obj = json.loads(line)
 
-    except requests.exceptions.ConnectionError:
-        raise RuntimeError("[CONNECTION ERROR] Ollama nicht erreichbar (läuft der Server?).")
+        if "response" in obj:
+            parts.append(obj["response"])
 
-    except requests.exceptions.ReadTimeout:
-        raise RuntimeError("[TIMEOUT] Ollama hat nicht rechtzeitig geantwortet.")
+        if obj.get("done") is True:
+            next_context = obj.get("context")
+            break
 
-    except Exception as e:
-        raise RuntimeError(f"[EXCEPTION] Unerwarteter Fehler: {e}") from e
+    text = "".join(parts).strip()
+
+    if not text:
+        raise RuntimeError("Empty response from Ollama")
+
+    return text, next_context

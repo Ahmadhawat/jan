@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import requests
 
 # -----------------------------
@@ -8,20 +9,19 @@ import requests
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "llama3"
 
-# change this to your folder
-DATA_FOLDER = "data"  
+DATA_FOLDER = "data"  # folder containing manifest.json
+MANIFEST_FILE = os.path.join(DATA_FOLDER, "manifest.json")
 
-# how many docs to send to LLM
-TOP_K = 5  
+TOP_K = 5  # number of chunks to send
 
 
 # -----------------------------
-# SYSTEM PROMPT (RULES)
+# SYSTEM PROMPT
 # -----------------------------
 SYSTEM_PROMPT = """
 You are a question answering system.
 
-You must ONLY use the provided documents to answer.
+You must ONLY use the provided documents.
 
 Each document contains:
 - SOURCE: a link
@@ -38,18 +38,14 @@ Rules:
 
 
 # -----------------------------
-# PARSE FILE
+# PARSE DOCUMENT
 # -----------------------------
 def parse_document(raw_text):
-    """
-    Extract source and content from:
-    <doc ref="...">
-    """
-    # extract source
+    # extract source link
     match = re.search(r'<doc ref="([^"]+)">', raw_text)
     source = match.group(1) if match else "UNKNOWN"
 
-    # remove xml tag
+    # remove XML tag
     content = re.sub(r'<doc ref="[^"]+">', '', raw_text).strip()
 
     return {
@@ -59,33 +55,42 @@ def parse_document(raw_text):
 
 
 # -----------------------------
-# LOAD FILES
+# LOAD DOCUMENTS FROM MANIFEST
 # -----------------------------
-def load_documents(folder):
-    docs = []
+def load_documents_from_manifest():
+    documents = []
 
-    for filename in os.listdir(folder):
-        path = os.path.join(folder, filename)
+    with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
 
-        if not os.path.isfile(path):
+    # iterate in order (Python 3.7+ preserves JSON order)
+    for key, value in manifest.items():
+        src_path = value.get("src_copy")
+
+        if not src_path or not os.path.exists(src_path):
+            print(f"WARNING: File not found -> {src_path}")
             continue
 
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            raw_text = f.read()
+        try:
+            with open(src_path, "r", encoding="utf-8", errors="ignore") as f:
+                raw_text = f.read()
+        except Exception as e:
+            print(f"ERROR reading {src_path}: {e}")
+            continue
 
         parsed = parse_document(raw_text)
-        docs.append(parsed)
 
-    return docs
+        documents.append(parsed)
+
+    return documents
 
 
 # -----------------------------
-# SIMPLE RETRIEVAL (PLACEHOLDER)
+# SIMPLE RETRIEVAL (TEMP)
 # -----------------------------
 def retrieve_documents(question, documents, top_k=TOP_K):
     """
-    TODO: replace with vector search
-    For now: just return first N docs
+    Replace later with embeddings
     """
     return documents[:top_k]
 
@@ -125,7 +130,6 @@ INSTRUCTIONS:
 
 ANSWER:
 """
-
     return prompt
 
 
@@ -148,19 +152,21 @@ def query_ollama(prompt):
     response = requests.post(OLLAMA_URL, json=payload)
 
     if response.status_code != 200:
-        raise Exception(f"Ollama error: {response.text}")
+        raise Exception(response.text)
 
     return response.json()["response"]
 
 
 # -----------------------------
-# MAIN RAG FUNCTION
+# MAIN FUNCTION
 # -----------------------------
 def ask(question):
     print(f"\nQuestion: {question}")
 
-    # 1. load documents
-    documents = load_documents(DATA_FOLDER)
+    # 1. load docs in correct order
+    documents = load_documents_from_manifest()
+
+    print(f"Loaded {len(documents)} documents")
 
     # 2. retrieve top docs
     top_docs = retrieve_documents(question, documents)
@@ -168,10 +174,10 @@ def ask(question):
     # 3. build prompt
     prompt = build_prompt(question, top_docs)
 
-    # DEBUG: print prompt (optional)
+    # DEBUG (optional)
     # print(prompt)
 
-    # 4. query model
+    # 4. ask LLM
     answer = query_ollama(prompt)
 
     print("\nAnswer:")
